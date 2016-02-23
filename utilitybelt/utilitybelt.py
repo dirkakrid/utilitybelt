@@ -11,6 +11,7 @@
 A library to make you a Python CND Batman
 """
 
+import json
 import re
 import socket
 import xml.etree.ElementTree as ET
@@ -21,8 +22,9 @@ from bs4 import BeautifulSoup
 from netaddr import IPAddress
 from netaddr import IPNetwork
 from netaddr import IPRange
+from netaddr import IPSet
 
-gi = pygeoip.GeoIP("data/GeoLiteCity.dat", pygeoip.MEMORY_CACHE)
+gi = pygeoip.GeoIP("../data/GeoLiteCity.dat", pygeoip.MEMORY_CACHE)
 
 # Indicators
 re_ipv4 = re.compile('(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)', re.I | re.S | re.M)
@@ -66,20 +68,81 @@ whitelist = [{'net': IPNetwork('10.0.0.0/8'), 'org': 'Private per RFC 1918'},
 
 useragent = 'Mozilla/5.0 (Windows NT 5.1; rv:31.0) Gecko/20100101 Firefox/31.0'
 
+class AWSNetQuery(object):
+    """ class for querying AWS IP prefix data """
+
+    def __init__(self):
+        """ return a dict of AWS prefixes as IP Networks """
+        aws_json = json.loads(requests.get('https://ip-ranges.amazonaws.com/ip-ranges.json').text)
+        self.aws_prefix_data = aws_json['prefixes']
+        for prefix in self.aws_prefix_data:
+            prefix['ip_prefix'] = IPNetwork(prefix['ip_prefix'])
+        self.aws_ips = IPSet([prefix['ip_prefix'] for prefix in self.aws_prefix_data])
+
+    def is_aws(self,ip):
+        """ return True if IP is in an AWS prefix """
+        return ip in self.aws_ips
+
+    def aws_service(self,ip):
+        """ return the AWS service for an IP """
+        for prefix in self.aws_prefix_data:
+            if ip in prefix['ip_prefix']:
+                return prefix['service']
+        return ''
+
+    def aws_region(self,ip):
+        """ return the AWS region for an IP """
+        for prefix in self.aws_prefix_data:
+            if ip in prefix['ip_prefix']:
+                return prefix['region']
+        return ''
+
+    def aws_prefix_info(self,ip):
+        """ return all info about an AWS IP """
+        for prefix in self.aws_prefix_data:
+            if ip in prefix['ip_prefix']:
+                return prefix
+        return {}
+
+class TorQuery(object):
+    """ class for querying information about Tor nodes """
+
+    def __init__(self):
+        """ get and parse Tor exit IP info """
+        tor_data = requests.get('https://check.torproject.org/exit-addresses').text
+        self.tor_addresses = []
+        for line in tor_data.split('\n'):
+            if line.startswith('ExitAddress'):
+                try:
+                    self.tor_addresses.append(line.split()[1])
+                except IndexError:
+                    continue
+        self.tor_ipset = IPSet(self.tor_addresses)
+
+    def is_tor(self,ip):
+        """ return True if an IP is a Tor exit node """
+        return ip in self.tor_ipset
+
+def cymru_hash(fhash):
+    """ DNS-based malware hash lookups from http://www.team-cymru.org."""
+    if not re.match(re_md5, fhash) and not re.match(re_sha1, fhash):
+        raise ValueError('invalid hash for Team Cymru; only MD5 or SHA-1 allowed.')
+    try:
+        if socket.gethostbyname('%s.malware.hash.cymru.com' % fhash) == '127.0.0.2':
+            return True
+    except socket.gaierror:
+        return False
 
 def ip_to_long(ip):
     """Convert an IPv4Address string to long"""
     return int(IPAddress(ip))
 
-
 def ip_between(ip, start, finish):
     """Checks to see if IP is between start and finish"""
-
     if is_IPv4Address(ip) and is_IPv4Address(start) and is_IPv4Address(finish):
         return IPAddress(ip) in IPRange(start, finish)
     else:
         return False
-
 
 def is_rfc1918(ip):
     """Checks to see if an IP address is used for local communications within
@@ -93,7 +156,6 @@ def is_rfc1918(ip):
         return True
     else:
         return False
-
 
 def is_reserved(ip):
     """Checks to see if an IP address is reserved for special purposes. This includes
@@ -133,10 +195,8 @@ def is_reserved(ip):
     else:
         return False
 
-
 def is_IPv4Address(ipv4address):
     """Returns true for valid IPv4 Addresses, false for invalid."""
-
     # alternately: catch AddrConversionError from IPAddress(ipv4address).ipv4()
     return bool(re.match(re_ipv4, ipv4address))
 
@@ -255,6 +315,17 @@ def ips_to_geojson(ipaddresses):
 
     return points
 
+def oui(mac):
+    """Returns the IEEE vendor code company field for a MAC address."""
+    return oui_full(mac)['company']
+
+def oui_full(mac):
+    """Returns the full OUI lookup response from http://macvendorlookup.com."""
+    r = requests.get("http://www.macvendorlookup.com/api/v2/%s" % mac)
+    if r.status_code == 200:
+        return r.json()[0]
+    else:
+        return False
 
 def reverse_dns_sna(ipaddress):
     """Returns a list of the dns names that point to a given ipaddress using StatDNS API"""
